@@ -1,7 +1,6 @@
 "use client";
 
 import { useAuth, SignInButton } from "@clerk/nextjs";
-import { dark } from "@clerk/ui/themes";
 import {
   CheckoutButton,
   usePlans,

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Lora, DM_Sans } from "next/font/google";
-import { dark } from "@clerk/ui/themes";
 import "./globals.css";
 import Header from "@/components/Header";
 import { ClerkProvider } from "@clerk/nextjs";
@@ -31,11 +30,7 @@ export default function RootLayout({
   <body
     className={`${lora.variable} ${dmSans.variable} font-sans bg-[#0a0a0a]`}
   >
-    <ClerkProvider
-      appearance={{
-        theme: dark,
-      }}
-    >
+    <ClerkProvider>
       <Header />
       <main>{children}</main>
     </ClerkProvider>
