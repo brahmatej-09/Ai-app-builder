@@ -4,18 +4,81 @@ import { GoogleGenAI } from "@google/genai";
 import { db } from "@/lib/prisma";
 import { CREDIT_COST_PER_GENERATION } from "@/lib/constants";
 import type { Message, FileData } from "@/Types/workspace";
+import { aj } from "@/lib/arcjet";
 
-const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY!,
-});
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
 // ─── SSE helper ───────────────────────────────────────────────────────────────
 
 function sseEvent(type: string, payload: unknown): string {
-    return `data: ${JSON.stringify({
-        type,
-        ...(payload as object),
-    })}\n\n`;
+    return `data: ${JSON.stringify({ type, ...(payload as object) })}\n\n`;
+}
+
+// ─── Extract short label from a Gemini thought chunk ─────────────────────────
+// Gemini thoughts often start with a bold heading like **Verify Config**
+// We extract that. If no bold heading, take the first sentence only.
+
+function extractThoughtLabel(text: string): string | null {
+    // Try to grab **bold heading** at the start
+    const boldMatch = text.match(/\*\*([^*]{4,60})\*\*/);
+    if (boldMatch) return boldMatch[1].trim();
+
+    // Fall back to first sentence (up to first . or \n), capped at 60 chars
+    const sentence = text.split(/[.\n]/)[0].trim();
+    if (sentence.length >= 8 && sentence.length <= 80) return sentence;
+
+    return null;
+}
+
+async function generateGeminiStreamWithRetry(
+    contents: ReturnType<typeof buildContents>,
+    enqueue: (chunk: string) => void
+) {
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await ai.models.generateContentStream({
+                model: "gemini-3.5-flash",
+                contents,
+                config: {
+                    systemInstruction: SYSTEM_PROMPT,
+                    temperature: 0.7,
+                    responseMimeType: "application/json",
+                    thinkingConfig: {
+                        includeThoughts: true,
+                    },
+                },
+            });
+        } catch (err) {
+            const status =
+                typeof err === "object" &&
+                err !== null &&
+                "status" in err &&
+                typeof (err as { status?: unknown }).status === "number"
+                    ? (err as { status: number }).status
+                    : undefined;
+
+            // 503 means Gemini is temporarily unavailable/overloaded.
+            // Retry only this transient error. Do not automatically retry
+            // 429 quota errors because repeated requests can consume quota.
+            if (status !== 503 || attempt === maxAttempts) {
+                throw err;
+            }
+
+            const delayMs = attempt === 1 ? 2000 : 5000;
+
+            enqueue(
+                sseEvent("status", {
+                    message: `Gemini is busy. Retrying (${attempt + 1}/${maxAttempts})…`,
+                })
+            );
+
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+    }
+
+    throw new Error("Gemini generation failed after retries.");
 }
 
 // ─── npm validation ───────────────────────────────────────────────────────────
@@ -24,36 +87,25 @@ async function validateDependencies(
     deps: Record<string, string>
 ): Promise<Record<string, string>> {
     const valid: Record<string, string> = {};
-
     await Promise.all(
         Object.entries(deps).map(async ([pkg, version]) => {
             try {
-                const res = await fetch(
-                    `https://registry.npmjs.org/${pkg}/latest`,
-                    {
-                        signal: AbortSignal.timeout(1500),
-                    }
-                );
-
-                if (res.ok) {
-                    valid[pkg] = version;
-                }
+                const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, {
+                    signal: AbortSignal.timeout(1500),
+                });
+                if (res.ok) valid[pkg] = version;
             } catch {
-                // Ignore packages that cannot be validated.
+                // silently skip hallucinated packages
             }
         })
     );
-
     return valid;
 }
 
 // ─── History trimming ─────────────────────────────────────────────────────────
 
 function trimHistory(messages: Message[]): Message[] {
-    if (messages.length <= 10) {
-        return messages;
-    }
-
+    if (messages.length <= 10) return messages;
     return [messages[0], ...messages.slice(-8)];
 }
 
@@ -62,11 +114,8 @@ function trimHistory(messages: Message[]): Message[] {
 const SYSTEM_PROMPT = `You are an expert React developer. Your job is to generate complete, working React applications based on user prompts.
 
 RULES:
-
 1. Always respond with a valid JSON object — no markdown fences, no extra text.
-
 2. The JSON must match this exact shape:
-
 {
   "assistantMessage": "<brief explanation of what you built/changed>",
   "title": "<short 2-4 word title for the app, e.g. 'Todo List App'>",
@@ -78,528 +127,287 @@ RULES:
     "some-package": "latest"
   }
 }
-
 3. Use React (functional components + hooks). Do NOT use TypeScript in generated files.
-
 4. Use Tailwind CSS for all styling. Do not use CSS modules or inline styles unless absolutely necessary.
-
 5. The entry point must always be /App.js and must export a default component.
-
 6. All imports must reference files you include in "files" or packages in "dependencies".
-
 7. Do not include react, react-dom, or tailwindcss in "dependencies" — they are always available.
-
 8. When modifying existing code, include ALL files (both changed and unchanged) in "files".
-
 9. Keep code clean, readable, and production-quality.
-
-10. If the user attaches an image, use it as a design reference and match the layout/style as closely as possible.
-
-11. Make sure every generated file contains complete code and can run without missing imports.
-
-12. Do not return explanations outside the JSON object.`;
+10. If the user attaches an image, use it as a design reference and match the layout/style as closely as possible.`;
 
 // ─── Gemini contents builder ──────────────────────────────────────────────────
 
-function buildContents(
-    messages: Message[],
-    fileData: FileData | null
-) {
+function buildContents(messages: Message[], fileData: FileData | null) {
     const trimmed = trimHistory(messages);
 
     return trimmed.map((msg, idx) => {
         const role = msg.role === "assistant" ? "model" : "user";
 
         if (msg.role === "user") {
+            const parts: object[] = [];
+
             let text = msg.content;
 
             if (msg.imageUrl) {
-                text =
-                    `[The user has attached an image. Use this URL directly in the generated app where relevant (as img src, background-image, etc.): ${msg.imageUrl}]\n\n` +
-                    text;
+                text = `[The user has attached an image. Use this URL directly in the generated app where relevant (as img src, background-image, etc.): ${msg.imageUrl}]\n\n${text}`;
             }
 
             const isLast = idx === trimmed.length - 1;
-
             if (isLast && fileData) {
                 text +=
                     "\n\nCurrent project files for context:\n" +
                     JSON.stringify(fileData, null, 2);
             }
 
-            return {
-                role,
-                parts: [{ text }],
-            };
+            parts.push({ text });
+            return { role, parts };
         }
 
-        return {
-            role,
-            parts: [{ text: msg.content }],
-        };
+        return { role, parts: [{ text: msg.content }] };
     });
 }
 
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
-    try {
-        // ── Authenticate user ──────────────────────────────────────────────────
+    const { userId: clerkId } = await auth();
+    if (!clerkId) {
+        return Response.json({ message: "Unauthorized" }, { status: 401 });
+    }
 
-        const { userId: clerkId } = await auth();
+    const body = await request.json();
+    const { workspaceId, userId, messages, fileData } = body as {
+        workspaceId: string | null;
+        userId: string;
+        messages: Message[];
+        fileData: FileData | null;
+    };
 
-        if (!clerkId) {
-            return Response.json(
-                { message: "Unauthorized" },
-                { status: 401 }
-            );
-        }
+    if (!messages?.length) {
+        return Response.json({ message: "No messages provided" }, { status: 400 });
+    }
 
-        // ── Read request body ──────────────────────────────────────────────────
+    // ── Arcjet: rate limit, prompt injection, sensitive info ──────────────────
+    // detectPromptInjectionMessage requires the actual user text to inspect.
 
-        const body = await request.json();
+    // const arcjetReq = new Request(request.url, {
+    //   method: request.method,
+    //   headers: request.headers,
+    //   body: JSON.stringify(body),
+    // });
 
-        const {
-            workspaceId,
-            messages,
-            fileData,
-        } = body as {
-            workspaceId: string | null;
-            userId: string;
-            messages: Message[];
-            fileData: FileData | null;
-        };
+    // const lastUserMessage =
+    //   [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    // const decision = await aj.protect(arcjetReq, {
+    //   requested: 1,
+    //   userId: clerkId,
+    //   detectPromptInjectionMessage: lastUserMessage,
+    // });
 
-        if (!messages?.length) {
-            return Response.json(
-                { message: "No messages provided" },
-                { status: 400 }
-            );
-        }
+    // if (decision.isDenied()) {
+    //   return Response.json(
+    //     { message: decision.reason?.type ?? "Request blocked" },
+    //     { status: 429 }
+    //   );
+    // }
 
-        // ── Find authenticated database user ──────────────────────────────────
+    const user = await db.user.findUnique({
+        where: { clerkId },
+        select: { id: true, credits: true },
+    });
 
-        const user = await db.user.findUnique({
-            where: {
-                clerkId,
-            },
-            select: {
-                id: true,
-                credits: true,
-            },
-        });
+    if (!user) {
+        return Response.json(
+            { message: "User not found" },
+            { status: 404 }
+        );
+    }
+    if (user.credits < CREDIT_COST_PER_GENERATION) {
+        return Response.json({ message: "Insufficient credits" }, { status: 402 });
+    }
 
-        if (!user) {
-            return Response.json(
-                { message: "User not found" },
-                { status: 404 }
-            );
-        }
+    const encoder = new TextEncoder();
 
-        // ── Check credits ─────────────────────────────────────────────────────
+    const stream = new ReadableStream({
+        async start(controller) {
+            const enqueue = (chunk: string) =>
+                controller.enqueue(encoder.encode(chunk));
 
-        if (user.credits < CREDIT_COST_PER_GENERATION) {
-            return Response.json(
-                { message: "Insufficient credits" },
-                { status: 402 }
-            );
-        }
+            try {
+                const contents = buildContents(messages, fileData);
 
-        // ── Create SSE stream ─────────────────────────────────────────────────
+                const geminiStream = await generateGeminiStreamWithRetry(
+                    contents,
+                    enqueue
+                );
 
-        const encoder = new TextEncoder();
+                let accumulated = ""; // final JSON output
+                let lastEmitTime = 0; // throttle thought emissions
 
-        const stream = new ReadableStream({
-            async start(controller) {
-                const enqueue = (chunk: string) => {
-                    controller.enqueue(encoder.encode(chunk));
-                };
+                for await (const chunk of geminiStream) {
+                    const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 
-                try {
-                    // ─────────────────────────────────────────────────────────────
-                    // Build Gemini input
-                    // ─────────────────────────────────────────────────────────────
+                    for (const part of parts) {
+                        if (!part.text) continue;
 
-                    const contents = buildContents(
-                        messages,
-                        fileData
-                    );
-
-                    enqueue(
-                        sseEvent("status", {
-                            message: "Generating code…",
-                        })
-                    );
-
-                    console.log(
-                        "[gen-ai-code] Starting Gemini generation..."
-                    );
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Gemini streaming generation
-                    // ─────────────────────────────────────────────────────────────
-
-                    const geminiStream =
-                        await ai.models.generateContentStream({
-                            model: "gemini-3.5-flash",
-
-                            contents,
-
-                            config: {
-                                systemInstruction: SYSTEM_PROMPT,
-
-                                // We want Gemini to return JSON.
-                                responseMimeType: "application/json",
-                            },
-                        });
-
-                    let accumulated = "";
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Read Gemini stream
-                    // ─────────────────────────────────────────────────────────────
-
-                    for await (const chunk of geminiStream) {
-                        const parts =
-                            chunk.candidates?.[0]?.content?.parts ?? [];
-
-                        for (const part of parts) {
-                            if (!part.text) {
-                                continue;
+                        if (part.thought) {
+                            // Extract just the short label — not the full wall of text
+                            const now = Date.now();
+                            if (now - lastEmitTime > 600) {
+                                const label = extractThoughtLabel(part.text);
+                                if (label) {
+                                    enqueue(sseEvent("status", { message: label }));
+                                    lastEmitTime = now;
+                                }
                             }
-
+                        } else {
+                            // Actual JSON output
                             accumulated += part.text;
                         }
                     }
+                }
 
-                    console.log(
-                        "[gen-ai-code] Gemini response received."
-                    );
+                // ── Parse the complete JSON response ──────────────────────────────────
 
-                    console.log(
-                        "[gen-ai-code] Response length:",
-                        accumulated.length
-                    );
+                let parsed: {
+                    assistantMessage: string;
+                    title?: string;
+                    files: Record<string, { code: string }>;
+                    dependencies: Record<string, string>;
+                };
 
-                    // ─────────────────────────────────────────────────────────────
-                    // Make sure Gemini returned something
-                    // ─────────────────────────────────────────────────────────────
-
-                    if (!accumulated.trim()) {
-                        enqueue(
-                            sseEvent("error", {
-                                message:
-                                    "Gemini returned an empty response. Please try again.",
-                            })
-                        );
-
-                        return;
-                    }
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Parse JSON response
-                    // ─────────────────────────────────────────────────────────────
-
-                    let parsed: {
-                        assistantMessage: string;
-                        title?: string;
-                        files: Record<
-                            string,
-                            {
-                                code: string;
-                            }
-                        >;
-                        dependencies: Record<string, string>;
-                    };
-
-                    try {
-                        parsed = JSON.parse(accumulated);
-                    } catch (error) {
-                        console.error(
-                            "[gen-ai-code] JSON parse error:",
-                            error
-                        );
-
-                        console.error(
-                            "[gen-ai-code] Raw Gemini response:",
-                            accumulated.slice(0, 3000)
-                        );
-
-                        enqueue(
-                            sseEvent("error", {
-                                message:
-                                    "AI returned invalid JSON. Please try again.",
-                            })
-                        );
-
-                        return;
-                    }
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Extract generated data
-                    // ─────────────────────────────────────────────────────────────
-
-                    const {
-                        assistantMessage,
-                        title: aiTitle,
-                        files,
-                        dependencies,
-                    } = parsed;
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Validate generated files
-                    // ─────────────────────────────────────────────────────────────
-
-                    if (
-                        !files ||
-                        typeof files !== "object" ||
-                        Array.isArray(files)
-                    ) {
-                        enqueue(
-                            sseEvent("error", {
-                                message:
-                                    "AI response is missing generated files. Please try again.",
-                            })
-                        );
-
-                        return;
-                    }
-
-                    if (!files["/App.js"]) {
-                        enqueue(
-                            sseEvent("error", {
-                                message:
-                                    "AI response did not include /App.js. Please try again.",
-                            })
-                        );
-
-                        return;
-                    }
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Validate npm packages
-                    // ─────────────────────────────────────────────────────────────
-
-                    enqueue(
-                        sseEvent("status", {
-                            message: "Validating packages…",
-                        })
-                    );
-
-                    const validatedDeps =
-                        await validateDependencies(
-                            dependencies ?? {}
-                        );
-
-                    const newFileData: FileData = {
-                        files,
-                        dependencies: validatedDeps,
-                        title: aiTitle,
-                    };
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Save workspace
-                    // ─────────────────────────────────────────────────────────────
-
-                    enqueue(
-                        sseEvent("status", {
-                            message: "Saving…",
-                        })
-                    );
-
-                    const lastUserMessage =
-                        messages[messages.length - 1];
-
-                    const updatedMessages: Message[] = [
-                        ...messages,
-                        {
-                            role: "assistant",
-                            content:
-                                assistantMessage ||
-                                "Generated your application.",
-                        },
-                    ];
-
-                    let workspace;
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Existing workspace
-                    // ─────────────────────────────────────────────────────────────
-
-                    if (workspaceId) {
-                        const existingWorkspace =
-                            await db.workspace.findFirst({
-                                where: {
-                                    id: workspaceId,
-                                    userId: user.id,
-                                },
-                            });
-
-                        if (!existingWorkspace) {
-                            enqueue(
-                                sseEvent("error", {
-                                    message:
-                                        "Workspace not found.",
-                                })
-                            );
-
-                            return;
-                        }
-
-                        workspace =
-                            await db.workspace.update({
-                                where: {
-                                    id: existingWorkspace.id,
-                                },
-
-                                data: {
-                                    messages:
-                                        updatedMessages as never,
-
-                                    fileData:
-                                        newFileData as never,
-                                },
-                            });
-                    }
-
-                    // ─────────────────────────────────────────────────────────────
-                    // New workspace
-                    // ─────────────────────────────────────────────────────────────
-
-                    else {
-                        workspace =
-                            await db.workspace.create({
-                                data: {
-                                    userId: user.id,
-
-                                    title:
-                                        aiTitle ??
-                                        lastUserMessage.content.slice(
-                                            0,
-                                            80
-                                        ),
-
-                                    messages:
-                                        updatedMessages as never,
-
-                                    fileData:
-                                        newFileData as never,
-                                },
-                            });
-                    }
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Deduct credits
-                    // ─────────────────────────────────────────────────────────────
-
-                    await db.user.update({
-                        where: {
-                            id: user.id,
-                        },
-
-                        data: {
-                            credits: {
-                                decrement:
-                                    CREDIT_COST_PER_GENERATION,
-                            },
-                        },
-                    });
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Get remaining credits
-                    // ─────────────────────────────────────────────────────────────
-
-                    const updatedUser =
-                        await db.user.findUnique({
-                            where: {
-                                id: user.id,
-                            },
-
-                            select: {
-                                credits: true,
-                            },
-                        });
-
-                    // ─────────────────────────────────────────────────────────────
-                    // Send final result
-                    // ─────────────────────────────────────────────────────────────
-
-                    console.log(
-                        "[gen-ai-code] Generation completed successfully."
-                    );
-
-                    enqueue(
-                        sseEvent("done", {
-                            workspaceId: workspace.id,
-
-                            assistantMessage:
-                                assistantMessage ||
-                                "Generated your application.",
-
-                            fileData: newFileData,
-
-                            creditsRemaining:
-                                updatedUser?.credits ??
-                                user.credits -
-                                    CREDIT_COST_PER_GENERATION,
-                        })
-                    );
-                } catch (err) {
-                    console.error(
-                        "[gen-ai-code] stream error:",
-                        err
-                    );
-
-                    // IMPORTANT:
-                    // Send the actual backend error to the frontend
-                    // instead of hiding it behind a generic message.
-
-                    const message =
-                        err instanceof Error
-                            ? err.message
-                            : "Something went wrong while generating your application.";
-
+                try {
+                    parsed = JSON.parse(accumulated);
+                } catch {
                     enqueue(
                         sseEvent("error", {
-                            message,
+                            message: "AI returned invalid JSON. Please try again.",
                         })
                     );
-                } finally {
                     controller.close();
+                    return;
                 }
-            },
-        });
 
-        return new Response(stream, {
-            headers: {
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache, no-transform",
-                Connection: "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        });
-    } catch (err) {
-        console.error(
-            "[gen-ai-code] request error:",
-            err
-        );
+                const {
+                    assistantMessage,
+                    title: aiTitle,
+                    files,
+                    dependencies,
+                } = parsed;
 
-        return Response.json(
-            {
-                message:
-                    err instanceof Error
-                        ? err.message
-                        : "Something went wrong.",
-            },
-            {
-                status: 500,
+                if (!files || typeof files !== "object") {
+                    enqueue(
+                        sseEvent("error", {
+                            message: "AI response missing files. Please try again.",
+                        })
+                    );
+                    controller.close();
+                    return;
+                }
+
+                // ── Validate npm packages ──────────────────────────────────────────────
+
+                enqueue(sseEvent("status", { message: "Validating packages…" }));
+                const validatedDeps = await validateDependencies(dependencies ?? {});
+                const newFileData: FileData = {
+                    files,
+                    dependencies: validatedDeps,
+                    title: aiTitle,
+                };
+
+                // ── Upsert workspace + deduct credit (single transaction) ──────────────
+
+                enqueue(sseEvent("status", { message: "Saving…" }));
+
+                const lastUserMessage = messages[messages.length - 1];
+                const updatedMessages: Message[] = [
+                    ...messages,
+                    { role: "assistant", content: assistantMessage },
+                ];
+
+                const [workspace] = await db.$transaction([
+                    workspaceId
+                        ? db.workspace.update({
+                            where: { id: workspaceId, userId: user.id },
+                            data: {
+                                messages: updatedMessages as never,
+                                fileData: newFileData as never,
+                            },
+                        })
+                        : db.workspace.create({
+                            data: {
+                                userId: user.id,
+                                title: aiTitle ?? lastUserMessage.content.slice(0, 80),
+                                messages: updatedMessages as never,
+                                fileData: newFileData as never,
+                            },
+                        }),
+                    db.user.update({
+                        where: { id: user.id },
+                        data: { credits: { decrement: CREDIT_COST_PER_GENERATION } },
+                    }),
+                ]);
+
+                const updatedUser = await db.user.findUnique({
+                    where: { id: user.id },
+                    select: { credits: true },
+                });
+
+                // ── Emit final result ──────────────────────────────────────────────────
+
+                enqueue(
+                    sseEvent("done", {
+                        workspaceId: workspace.id,
+                        assistantMessage,
+                        fileData: newFileData,
+                        creditsRemaining:
+                            updatedUser?.credits ?? user.credits - CREDIT_COST_PER_GENERATION,
+                    })
+                );
+            } catch (err) {
+                console.error("[gen-ai-code] stream error:", err);
+
+                const status =
+                    typeof err === "object" &&
+                    err !== null &&
+                    "status" in err &&
+                    typeof (err as { status?: unknown }).status === "number"
+                        ? (err as { status: number }).status
+                        : undefined;
+
+                let message = "Something went wrong. Please try again.";
+
+                if (status === 503) {
+                    message =
+                        "Gemini is temporarily busy. Please try again in a moment.";
+                } else if (status === 429) {
+                    message =
+                        "Gemini quota is temporarily unavailable. Please try again later.";
+                } else if (status === 403) {
+                    message =
+                        "Gemini denied access to this project. Please check the Google AI Studio project.";
+                }
+
+                enqueue(
+                    sseEvent("error", {
+                        message,
+                    })
+                );
+            } finally {
+                controller.close();
             }
-        );
-    }
+        },
+    });
+
+    return new Response(stream, {
+        headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+        },
+    });
 }
 
-// ─── Next.js configuration ────────────────────────────────────────────────────
-
 export const runtime = "nodejs";
-
-export const maxDuration = 300;
+export const maxDuration = 300; // for vercel - 300s on Fluid

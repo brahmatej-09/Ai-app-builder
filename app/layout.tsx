@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
-import { Lora, DM_Sans } from "next/font/google";
+import { DM_Sans, Lora } from "next/font/google";
 import "./globals.css";
-import Header from "@/components/Header";
 import { ClerkProvider } from "@clerk/nextjs";
+import Header from "@/components/Header";
+import { dark } from "@clerk/ui/themes";
+import { ThemeProvider } from "@/components/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
 
 const lora = Lora({
   subsets: ["latin"],
@@ -18,23 +21,40 @@ const dmSans = DM_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Ai-app-Builder",
-  description: "Done by Brahmatej",
+  title: "Forge - AI App Builder",
+  description: "",
+  icons: {
+    icon: "/logo-short.jpeg",
+  },
 };
 
 export default function RootLayout({
   children,
-}: LayoutProps<"/">) {
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
-    <html lang="en">
-  <body
-    className={`${lora.variable} ${dmSans.variable} font-sans bg-[#0a0a0a]`}
-  >
-    <ClerkProvider>
-      <Header />
-      <main>{children}</main>
+    <ClerkProvider
+      appearance={{
+        theme: dark,
+      }}
+    >
+      <html lang="en" suppressHydrationWarning>
+        <body className={`${lora.variable} ${dmSans.variable} font-sans`}>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <Header />
+
+            <main>{children}</main>
+
+            <Toaster richColors />
+          </ThemeProvider>
+        </body>
+      </html>
     </ClerkProvider>
-  </body>
-</html>
   );
 }

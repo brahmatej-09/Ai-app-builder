@@ -24,7 +24,7 @@ import {
 import { RingLoader } from "react-spinners";
 import JSZip from "jszip";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { PricingModal } from "@/components/PricingModal";
 import type { FileData, StatusStep } from "@/Types/workspace";
 
@@ -290,33 +290,39 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
     statusLog[statusLog.length - 1]?.label ?? "Generating…";
 
   return (
-    <Tabs
-      value={activeTab}
-      onValueChange={(v) => setActiveTab(v as ActiveTab)}
-      className="flex h-full flex-col gap-0"
-    >
-      {/* Tabs + Actions bar */}
-      <div className="flex items-center justify-between border-b border-white/6 px-2">
-        <TabsList
-          variant="line"
-          className="h-auto gap-0 rounded-none bg-transparent p-0"
-        >
-          <TabsTrigger
-            className="border-b-2 border-transparent pt-2 text-white/70 hover:text-white data-[state=active]:border-white data-[state=active]:text-white"
-            value="code"
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
+      {/* Fixed toolbar — always stays below the Forge header */}
+      <div className="relative z-50 flex h-12 shrink-0 items-center justify-between border-b border-white/10 bg-[#0f0f0f] px-3">
+        {/* Left: Preview / Code */}
+        <div className="flex h-full items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab("preview")}
+            className={`flex h-full items-center gap-2 border-b-2 px-3 text-sm font-medium transition-colors ${
+              activeTab === "preview"
+                ? "border-white text-white"
+                : "border-transparent text-white/50 hover:text-white/80"
+            }`}
           >
-            <Code2 className="h-3.5 w-3.5 text-white" />
-            Code
-          </TabsTrigger>
-          <TabsTrigger
-            className="border-b-2 border-transparent pt-2 text-white/70 hover:text-white data-[state=active]:border-white data-[state=active]:text-white"
-            value="preview"
-          >
-            <Eye className="h-3.5 w-3.5 text-white" />
+            <Eye className="h-3.5 w-3.5" />
             Preview
-          </TabsTrigger>
-        </TabsList>
+          </button>
 
+          <button
+            type="button"
+            onClick={() => setActiveTab("code")}
+            className={`flex h-full items-center gap-2 border-b-2 px-3 text-sm font-medium transition-colors ${
+              activeTab === "code"
+                ? "border-white text-white"
+                : "border-transparent text-white/50 hover:text-white/80"
+            }`}
+          >
+            <Code2 className="h-3.5 w-3.5" />
+            Code
+          </button>
+        </div>
+
+        {/* Right: Improve / Upgrade + Download */}
         <div className="flex items-center gap-1.5">
           {/* ── Improve button ── */}
           {isProUser ? (
@@ -337,6 +343,7 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
                   />
                 </div>
                 <button
+                  type="button"
                   onClick={handleImproveSubmit}
                   disabled={!improveInput.trim() || isImproving}
                   className="group relative flex h-7 w-7 items-center justify-center overflow-hidden rounded-md border border-violet-500/30 bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 text-violet-300 transition-all duration-200 hover:border-violet-400/50 hover:from-violet-500/30 hover:to-fuchsia-500/30 hover:shadow-[0_0_10px_rgba(139,92,246,0.3)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -350,6 +357,7 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
               </div>
             ) : (
               <button
+                type="button"
                 onClick={() => setShowImproveInput(true)}
                 disabled={isImproving || !fileData}
                 className="group relative flex h-7 cursor-pointer items-center gap-1.5 overflow-hidden rounded-md border border-white/10 bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-cyan-500/10 px-2.5 text-xs font-medium transition-all duration-300 hover:border-white/20 hover:from-violet-500/20 hover:via-fuchsia-500/20 hover:to-cyan-500/20 hover:shadow-[0_0_12px_rgba(139,92,246,0.3)] disabled:cursor-not-allowed disabled:opacity-40"
@@ -389,6 +397,7 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
             variant="ghost"
             onClick={handleExportZip}
             disabled={isExporting || !fileData}
+            className="text-white/60 hover:bg-white/10 hover:text-white"
           >
             {isExporting ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -400,92 +409,110 @@ root.render(<React.StrictMode><App /></React.StrictMode>);`
         </div>
       </div>
 
-      {/* Content area */}
-      <div className="relative flex-1 overflow-hidden h-full">
-        {(isGenerating || isImproving) && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-6 bg-[#0a0a0a]/85 backdrop-blur-sm">
-            <RingLoader color="#60a5fa" size={64} speedMultiplier={0.8} />
-            <div className="flex flex-col items-center gap-1.5">
-              <p className="text-sm font-medium text-white/60">
-                {isImproving ? "Improving with Cline AI…" : currentStepLabel}
-              </p>
-              <p className="text-xs text-white/20">
-                This usually takes 10–20 seconds
-              </p>
-            </div>
-          </div>
-        )}
-
-        <SandpackLayout
-          style={{
-            height: "100vh",
-            border: "none",
-            borderRadius: 0,
-            background: "transparent",
-          }}
-        >
-          <TabsContent
-            value="preview"
-            keepMounted
-            className="mt-0 h-full w-full"
-          >
-            <SandpackPreview
-              style={{ height: "89%" }}
-              showOpenInCodeSandbox={false}
-            />
-          </TabsContent>
-
-          <TabsContent
-            value="code"
-            keepMounted
-            className="mt-0 flex h-full w-full"
-          >
-            <SandpackFileExplorer
-              style={{
-                height: "90%",
-                width: "180px",
-                borderRight: "0.5px solid rgba(255,255,255,0.08)",
-              }}
-            />
-            <SandpackCodeEditor
-              style={{ height: "90%", flex: 1 }}
-              showTabs
-              showLineNumbers
-              showInlineErrors
-              closableTabs
-              readOnly
-            />
-          </TabsContent>
-        </SandpackLayout>
-      </div>
-
-      {/* Preview error banner — uses onFixError (Gemini), not onImprove (Cline) */}
-      {previewError &&
-        !isGenerating &&
-        !isImproving &&
-        activeTab === "preview" && (
-          <div className="absolute inset-x-0 -bottom-3 z-20 border-t border-red-500/20 bg-red-950/99 p-4 pb-6">
-            <div className="flex items-center gap-2.5">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400/70" />
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-medium text-red-400/80">
-                  Preview error
+      {/* Main content */}
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => setActiveTab(v as ActiveTab)}
+        className="flex min-h-0 flex-1 flex-col gap-0"
+      >
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          {(isGenerating || isImproving) && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-6 bg-[#0a0a0a]/85 backdrop-blur-sm">
+              <RingLoader color="#60a5fa" size={64} speedMultiplier={0.8} />
+              <div className="flex flex-col items-center gap-1.5">
+                <p className="text-sm font-medium text-white/60">
+                  {isImproving ? "Improving with Cline AI…" : currentStepLabel}
                 </p>
-                <p className="break-all text-[11px] text-red-300/50">
-                  {previewError}
+                <p className="text-xs text-white/20">
+                  This usually takes 10–20 seconds
                 </p>
               </div>
-              <Button
-                onClick={() => onFixError(previewError)}
-                variant="destructive"
-              >
-                <Bot className="h-3 w-3" />
-                Fix with AI
-              </Button>
             </div>
-          </div>
-        )}
-    </Tabs>
+          )}
+
+          {fileData ? (
+            <SandpackLayout
+              style={{
+                height: "100%",
+                minHeight: 0,
+                border: "none",
+                borderRadius: 0,
+                background: "transparent",
+              }}
+            >
+              <TabsContent
+                value="preview"
+                keepMounted
+                className="mt-0 h-full min-h-0 w-full"
+              >
+                <SandpackPreview
+                  style={{ height: "100%" }}
+                  showOpenInCodeSandbox={false}
+                />
+              </TabsContent>
+
+              <TabsContent
+                value="code"
+                keepMounted
+                className="mt-0 flex h-full min-h-0 w-full"
+              >
+                <SandpackFileExplorer
+                  style={{
+                    height: "100%",
+                    width: "180px",
+                    borderRight: "0.5px solid rgba(255,255,255,0.08)",
+                  }}
+                />
+                <SandpackCodeEditor
+                  style={{ height: "100%", flex: 1 }}
+                  showTabs
+                  showLineNumbers
+                  showInlineErrors
+                  closableTabs
+                  readOnly
+                />
+              </TabsContent>
+            </SandpackLayout>
+          ) : (
+            <div className="flex h-full min-h-0 w-full items-center justify-center bg-[#0a0a0a]">
+              <div className="flex flex-col items-center text-center">
+                <div className="mb-4 text-5xl">⚡</div>
+                <p className="text-sm text-white/40">
+                  Your app will appear here
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Preview error banner — uses onFixError (Gemini), not onImprove (Cline) */}
+          {previewError &&
+            !isGenerating &&
+            !isImproving &&
+            activeTab === "preview" && (
+              <div className="absolute inset-x-0 bottom-0 z-20 border-t border-red-500/20 bg-red-950/99 p-4 pb-6">
+                <div className="flex items-center gap-2.5">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400/70" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-medium text-red-400/80">
+                      Preview error
+                    </p>
+                    <p className="break-all text-[11px] text-red-300/50">
+                      {previewError}
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => onFixError(previewError)}
+                    variant="destructive"
+                  >
+                    <Bot className="h-3 w-3" />
+                    Fix with AI
+                  </Button>
+                </div>
+              </div>
+            )}
+        </div>
+      </Tabs>
+    </div>
   );
 }
 
@@ -520,7 +547,7 @@ export function CodePanel({
   const filePathKey = Object.keys(files).sort().join("|");
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SandpackProvider
         key={filePathKey}
         template="react"

@@ -117,8 +117,8 @@ export async function POST(request: NextRequest) {
         .join("\n\n---\n\n");
 
       const agent = new Agent({
-        providerId: "gemini",
-        modelId: "gemini-3.5-flash",
+        providerId: "groq",
+        modelId: "qwen/qwen3.8-27b",
         apiKey: process.env.GEMINI_API_KEY!,
         maxIterations: 8,
         systemPrompt: `You are an expert React developer improving a live browser preview app.

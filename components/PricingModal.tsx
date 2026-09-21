@@ -5,7 +5,7 @@ import {
   CheckoutButton,
   usePlans,
 } from "@clerk/nextjs/experimental";
-import { ArrowRight, Check } from "lucide-react";
+import { ArrowRight, Check, Zap, Crown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +17,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { BlueTitle, GrayTitle } from "./reusables";
-import { PRICING_PLANS } from "@/lib/constants";
+import { PRICING_PLANS, PLANS } from "@/lib/constants";
 
 interface PricingModalProps {
   children: React.ReactNode;
@@ -88,6 +88,33 @@ export function PricingModal({
             {description}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Current plan summary banner */}
+        {isSignedIn && activePlanKey && (
+          <div className="mx-6 mb-2 flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-4 py-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-500/15">
+              {activePlanKey === "pro" ? (
+                <Crown className="h-4 w-4 text-blue-400" />
+              ) : (
+                <Zap className="h-4 w-4 text-blue-400" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-white/80">
+                Current plan: <span className="text-blue-400">{PLANS[activePlanKey as keyof typeof PLANS]?.label ?? activePlanKey}</span>
+              </p>
+              <p className="text-[11px] text-white/35">
+                {PLANS[activePlanKey as keyof typeof PLANS]?.credits ?? 0} credits/month
+                {activePlanKey === "free" ? " · No credit card required" : " · Billed monthly"}
+              </p>
+            </div>
+            {activePlanKey !== "pro" && (
+              <span className="shrink-0 rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-400">
+                Upgrade available
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-3 px-6 pb-6 sm:grid-cols-3">
           {PRICING_PLANS.map((plan) => {
